@@ -1,0 +1,268 @@
+
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#4a416f">
+<title>Wertigkeits-Tracker</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;padding:18px;background:#f5f4fa;color:#28243a;
+font-family:system-ui,-apple-system,sans-serif}
+main{max-width:650px;margin:auto;background:white;padding:22px;
+border-radius:22px;box-shadow:0 5px 24px #30245410}
+h1{margin:0;font-size:1.65rem}
+p{line-height:1.5}
+.muted{color:#716c82;font-size:.9rem}
+.status{display:inline-block;padding:6px 12px;background:#f0edf8;
+border-radius:30px;font-size:.85rem;margin:12px 0}
+.value{font-size:2.7rem;font-weight:750;font-variant-numeric:tabular-nums}
+.row{display:flex;justify-content:space-between;align-items:center;gap:12px}
+input[type=range]{width:100%;margin:24px 0;accent-color:#6955a5}
+.ends{display:flex;justify-content:space-between;gap:12px;font-size:.8rem;color:#716c82}
+.buttons{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:22px 0}
+button{padding:13px 6px;border:0;border-radius:12px;background:#efedf6;
+color:#30284c;font-weight:650;font-size:.95rem;cursor:pointer}
+button.primary{background:#59458e;color:white}
+button:disabled{opacity:.4}
+.stats{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.stat{background:#f4f2f9;padding:12px;border-radius:12px}
+.stat strong{font-size:1.3rem}
+canvas{display:block;width:100%;height:240px;margin:12px 0;
+border:1px solid #e6e1f0;border-radius:12px}
+@media(max-width:380px){main{padding:16px}.buttons{gap:5px}
+button{font-size:.83rem}}
+</style>
+</head>
+<body>
+<main>
+<h1>Wertigkeits-Tracker</h1>
+<p class="muted">Höre deine Musik und bewege den Regler passend dazu, wie negativ oder positiv du den Moment empfindest.</p>
+<div id="status" class="status">Bereit</div>
+
+<div class="row">
+  <span>Aktuelle Wertigkeit</span>
+  <span id="value" class="value">50</span>
+</div>
+<input id="slider" type="range" min="1" max="100" step="1" value="50"
+aria-label="Wertigkeit von 1 negativ bis 100 positiv">
+<div class="ends">
+  <span>1 · Negativ</span>
+  <span>Positiv · 100</span>
+</div>
+
+<div class="buttons">
+  <button id="start" class="primary">Start</button>
+  <button id="pause" disabled>Pause</button>
+  <button id="stop" disabled>Beenden</button>
+</div>
+
+<div class="stats">
+  <div class="stat"><div class="muted">Dauer</div><strong id="duration">00:00</strong></div>
+  <div class="stat"><div class="muted">Messpunkte</div><strong id="count">0</strong></div>
+</div>
+
+<h3>Wertigkeit über die Zeit</h3>
+<p class="muted">Ein Messpunkt pro Sekunde. Die Kurve aktualisiert sich während der Aufnahme.</p>
+<canvas id="chart"></canvas>
+
+<div class="buttons" style="grid-template-columns:1fr 1fr">
+  <button id="export" disabled>CSV exportieren</button>
+  <button id="clear">Daten löschen</button>
+</div>
+<p class="muted">Die Daten werden lokal in diesem Browser gespeichert. Exportiere deine Messung als CSV, um sie langfristig aufzubewahren. Lass die Seite während der Aufnahme geöffnet und im Vordergrund.</p>
+</main>
+
+<script>
+(() => {
+const $ = id => document.getElementById(id);
+const slider = $('slider');
+const canvas = $('chart');
+const ctx = canvas.getContext('2d');
+const STORAGE = 'wertigkeits-tracker-v1';
+
+let data = [];
+let state = 'ready';
+let startTime = 0;
+let elapsedBefore = 0;
+let lastSecond = -1;
+let timer = null;
+
+try {
+  const saved = JSON.parse(localStorage.getItem(STORAGE));
+  if (saved && Array.isArray(saved.data)) {
+    data = saved.data;
+    lastSecond = data.length ? data[data.length - 1].second : -1;
+  }
+} catch(e) {}
+
+function save() {
+  try { localStorage.setItem(STORAGE, JSON.stringify({data})); }
+  catch(e) {}
+}
+
+function elapsed() {
+  if (state === 'running')
+    return elapsedBefore + (performance.now() - startTime) / 1000;
+  return elapsedBefore;
+}
+
+function fmt(seconds) {
+  seconds = Math.floor(seconds);
+  return String(Math.floor(seconds / 60)).padStart(2, '0') +
+    ':' + String(seconds % 60).padStart(2, '0');
+}
+
+function addPoint(second) {
+  if (second <= lastSecond) return;
+  data.push({second, value: Number(slider.value)});
+  lastSecond = second;
+}
+
+function update() {
+  $('value').textContent = slider.value;
+  $('count').textContent = data.length;
+  $('duration').textContent = fmt(data.length ? data[data.length-1].second : 0);
+  $('export').disabled = data.length === 0;
+  $('start').disabled = state === 'running';
+  $('pause').disabled = state === 'ready' || state === 'ended';
+  $('stop').disabled = state === 'ready' || state === 'ended';
+  $('pause').textContent = state === 'paused' ? 'Fortsetzen' : 'Pause';
+  $('clear').disabled = state === 'running';
+  $('status').textContent =
+    state === 'running' ? 'Aufnahme läuft' :
+    state === 'paused' ? 'Pausiert' :
+    state === 'ended' ? 'Aufnahme beendet' : 'Bereit';
+  draw();
+}
+
+function tick() {
+  if (state !== 'running') return;
+  const target = Math.floor(elapsed());
+  while (lastSecond < target) addPoint(lastSecond + 1);
+  save();
+  update();
+}
+
+function start() {
+  if (state === 'running') return;
+  if (state === 'ended') {
+    data = [];
+    lastSecond = -1;
+    elapsedBefore = 0;
+  }
+  if (lastSecond < 0) addPoint(0);
+  startTime = performance.now();
+  state = 'running';
+  save();
+  update();
+  timer = setInterval(tick, 50);
+}
+
+function pause() {
+  if (state === 'running') {
+    tick();
+    elapsedBefore = elapsed();
+    clearInterval(timer);
+    state = 'paused';
+  } else if (state === 'paused') {
+    startTime = performance.now();
+    state = 'running';
+    timer = setInterval(tick, 50);
+  }
+  update();
+}
+
+function stop() {
+  if (state !== 'running' && state !== 'paused') return;
+  tick();
+  if (state === 'running') elapsedBefore = elapsed();
+  clearInterval(timer);
+  state = 'ended';
+  save();
+  update();
+}
+
+function draw() {
+  const rect = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.max(1, rect.width * dpr);
+  canvas.height = Math.max(1, rect.height * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  const w = rect.width, h = rect.height;
+  const pad = {l:35, r:12, t:12, b:28};
+  const pw = w-pad.l-pad.r, ph = h-pad.t-pad.b;
+  ctx.clearRect(0,0,w,h);
+  ctx.font = '11px system-ui';
+  ctx.lineWidth = 1;
+
+  for (let v=0; v<=100; v+=20) {
+    const y=pad.t+ph*(100-v)/100;
+    ctx.strokeStyle='#e9e5f1';
+    ctx.beginPath(); ctx.moveTo(pad.l,y); ctx.lineTo(w-pad.r,y); ctx.stroke();
+    ctx.fillStyle='#716c82'; ctx.textAlign='right';
+    ctx.fillText(v,pad.l-7,y+4);
+  }
+
+  if (!data.length) {
+    ctx.fillStyle='#716c82'; ctx.textAlign='center';
+    ctx.fillText('Die Kurve erscheint hier',w/2,h/2);
+    return;
+  }
+
+  const maxT=Math.max(1,data[data.length-1].second);
+  const x=t=>pad.l+t/maxT*pw;
+  const y=v=>pad.t+(100-v)/100*ph;
+  ctx.strokeStyle='#6955a5'; ctx.lineWidth=2.5;
+  ctx.lineJoin='round'; ctx.lineCap='round'; ctx.beginPath();
+  data.forEach((p,i)=>{
+    if (i===0) ctx.moveTo(x(p.second),y(p.value));
+    else ctx.lineTo(x(p.second),y(p.value));
+  });
+  ctx.stroke();
+  ctx.fillStyle='#716c82'; ctx.textAlign='center';
+  ctx.fillText('0 s',pad.l,h-8);
+  ctx.fillText(maxT+' s',w-pad.r,h-8);
+}
+
+slider.addEventListener('input', () => {
+  $('value').textContent = slider.value;
+});
+
+$('start').addEventListener('click', start);
+$('pause').addEventListener('click', pause);
+$('stop').addEventListener('click', stop);
+
+$('export').addEventListener('click', () => {
+  if (!data.length) return;
+  const csv = 'Sekunde,Wertigkeit\n' +
+    data.map(p => `${p.second},${p.value}`).join('\n');
+  const blob = new Blob(['\uFEFF'+csv],
+    {type:'text/csv;charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'wertigkeits-messung.csv';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
+
+$('clear').addEventListener('click', () => {
+  if (state === 'running') return;
+  if (!confirm('Alle gespeicherten Messdaten löschen?')) return;
+  data = [];
+  lastSecond = -1;
+  elapsedBefore = 0;
+  state = 'ready';
+  try { localStorage.removeItem(STORAGE); } catch(e) {}
+  update();
+});
+
+window.addEventListener('resize', draw);
+update();
+})();
+</script>
+</body>
+</html>
